@@ -2,6 +2,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from .llm import call_llm
+import json
 
 app = FastAPI()
 
@@ -14,6 +15,8 @@ async def analyze(request: Request):
             return JSONResponse({"error": "No question provided"}, status_code=400)
 
         result = call_llm(question)
+
+        # IMPORTANT: must return stringified JSON list under "output"
         return JSONResponse({"output": json.dumps([result])})
 
     except Exception as e:
