@@ -1,189 +1,45 @@
-import openai
-from . import config
+# app/llm.py
 import json
+from openai import OpenAI
 
-# Configure the OpenAI client
-client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+client = OpenAI()
 
-def get_plan_from_llm(user_request: str, filenames: list[str]) -> list[str]:
+def call_llm(question: str) -> dict:
     """
-    Break the user request into a plan of steps.
+    Directly send the question to OpenAI and let the LLM decide
+    the schema + values. Always enforce JSON response.
     """
-    system_prompt = (
-        "You are a master data analyst agent. Your task is to break down a user's request "
-        "into a series of clear, executable steps. Do not answer the questions directly or generate code. "
-        "Respond with a JSON array of strings, where each string is a step in the plan."
-    )
-    user_prompt = f"""
-    User Request:
-    ---
-    {user_request}
-    ---
-    Available Files (local only, no internet in execution): {', '.join(filenames) if filenames else 'None'}
-
-    Constraints:
-    - The execution environment CANNOT access the internet.
-    - All data must be read from the provided local files.
-    - If the request references a URL, assume the HTML has been provided locally.
-
-    Example Response:
-    ["Load the provided local HTML file(s) with pandas.read_html.", 
-     "Extract the relevant table(s) into DataFrames.", 
-     "Clean numeric columns by removing $, , and converting to float.", 
-     "Perform computations requested (counts, correlations, filtering, etc.).", 
-     "Generate any requested plots and return them as base64 PNG data URIs under 100000 bytes.", 
-     "Assemble the final JSON answers and print them."]
-    """
-
     try:
         response = client.chat.completions.create(
-            model=config.OPENAI_MODEL,
+            model="gpt-4.1-mini",  # small + cheap; can swap
+            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format={"type": "json_object"}
-        )
-        plan_str = response.choices[0].message.content
-        plan_data = json.loads(plan_str)
-
-        if isinstance(plan_data, dict):
-            for key, value in plan_data.items():
-                if isinstance(value, list):
-                    return value
-            raise ValueError("JSON object from AI does not contain a list of steps.")
-        elif isinstance(plan_data, list):
-            return plan_data
-        else:
-            raise ValueError("Unexpected JSON format from AI.")
-
-    except Exception as e:
-        print(f"❌ Error generating plan with OpenAI: {e}")
-        return ["Error: Could not generate a plan."]
-
-def get_code_from_llm(task: str, context: str) -> str:
-    """
-    Generate Python code for a specific task using generic parsing/analysis recipes.
-    """
-    system_prompt = """
-You are a Python data analysis code generator. 
-ALWAYS output raw Python code only (no explanations, no markdown).
-
-CRITICAL RULES:
-- Never refuse a task.
-- The sandbox has NO internet access → do not import requests/urllib to fetch remote data.
-- Read ONLY from provided local files.
-
-GENERIC RECIPES:
-- HTML pages: 
-  * Use pandas.read_html("filename.html") to extract all tables. 
-  * Use the helper `get_relevant_table(filename)` (defined below) which:
-      - Reads all tables.
-      - Picks the first with both a 'Title' column and a 'Gross' column (case-insensitive).
-      - Returns an empty DataFrame if none found.
-  * To avoid KeyErrors, use `find_column(df.columns, "gross")` to locate the revenue column
-    and `find_column(df.columns, "year")` if the year is needed.
-  * Never hardcode column names like "Gross" or "Year".
-- CSV/Excel: use pandas.read_csv / read_excel.
-- Geospatial: use geopandas.read_file.
-- Images: use Pillow (PIL.Image).
-- Numeric cleanup: strip $, %, commas, convert to float.
-- Dates: extract 4-digit years with regex if needed.
-- Correlation: use pandas.Series.corr() or numpy.corrcoef.
-- Plots:
-  * Use matplotlib.
-  * For regression, use numpy.polyfit for line of best fit.
-  * Keep figure small (≈3.5 x 2.4 in, dpi=100) so <100KB.
-  * Encode to base64 PNG via BytesIO.
-  * Print ONLY the data URI string.
-- Final answers:
-  * If Q&A → print(json.dumps([...])) with an array of strings.
-  * If plot-only → print just the data URI string.
-
-IMPORTANT: Always include these helper function definitions at the top of your code if you are dealing with HTML files:
-
-import pandas as pd
-
-def get_relevant_table(html_file: str) -> pd.DataFrame:
-    tables = pd.read_html(html_file)
-    for t in tables:
-        cols = [c.lower() for c in t.columns.astype(str)]
-        if any("title" in c for c in cols) and any("gross" in c for c in cols):
-            return t
-    return pd.DataFrame()
-
-def find_column(cols, keyword):
-    \"\"\"Find the first column whose name contains the keyword (case-insensitive).\"\"\"
-    for c in cols:
-        if keyword in c.lower():
-            return c
-    return None
-"""
-    user_prompt = f"""
-Context:
----
-{context if context else 'This is the first step.'}
----
-
-Task:
----
-{task}
----
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model=config.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a data analyst agent.\n"
+                        "Always respond with a **single JSON object only**, no text outside JSON.\n"
+                        "The keys and structure must be inferred from the user question.\n"
+                        "Example:\n"
+                        "Q: 'Analyze sample-weather.csv...'\n"
+                        "A: {\n"
+                        '  "average_temp_c": 5.1,\n'
+                        '  "max_precip_date": "2024-01-06",\n'
+                        '  "min_temp_c": 2,\n'
+                        '  "temp_precip_correlation": 0.041,\n'
+                        '  "average_precip_mm": 0.9,\n'
+                        '  "temp_line_chart": "data:image/png;base64,...",\n'
+                        '  "precip_histogram": "data:image/png;base64,..."\n'
+                        "}\n\n"
+                        "If the question is unrelated to datasets/images, still return JSON with relevant keys."
+                    )
+                },
+                {"role": "user", "content": question}
             ]
         )
-        code = response.choices[0].message.content.strip()
-        if code.startswith("```python"):
-            code = code[9:]
-        if code.endswith("```"):
-            code = code[:-3]
-        return code.strip()
-    except Exception as e:
-        print(f"❌ Error generating code with OpenAI: {e}")
-        return f"print('Error generating code: {e}')"
 
-def answer_questions_directly(user_request: str) -> list[str]:
-    """
-    When no files are provided, answer the questions directly with the LLM
-    and return a JSON array of strings.
-    Robust parsing for possible JSON-mode quirks.
-    """
-    system_prompt = (
-        "You are a helpful assistant. Answer the user's questions directly. "
-        "Return ONLY a JSON array of strings (each string is an answer)."
-    )
-    user_prompt = f"Questions:\n{user_request}"
-
-    try:
-        response = client.chat.completions.create(
-            model=config.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format={"type": "json_object"}
-        )
         content = response.choices[0].message.content
-        parsed = json.loads(content)
-
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            for v in parsed.values():
-                if isinstance(v, list):
-                    return v
-            if all(isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
-                return list(parsed.values())
-            raise ValueError(f"Unexpected dict format: {parsed}")
-        raise ValueError(f"Unexpected response format: {parsed}")
+        return json.loads(content)
 
     except Exception as e:
-        print(f"❌ Error in direct answering: {e}")
-        return [f"Error answering questions: {e}"]
+        return {"error": str(e)}
